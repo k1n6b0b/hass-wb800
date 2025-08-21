@@ -1,0 +1,35 @@
+# macOS cruft
+.DS_Store
+*/.DS_Store
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+*.pyo
+*.pyd
+*.pkl
+
+# Virtual environments
+.env
+.venv/
+venv/
+ENV/
+
+# Development / test stuff
+dev/
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Coverage / testing
+.coverage
+htmlcov/
+.pytest_cache/
+
