@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import List
 import logging
 
@@ -13,19 +14,22 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 from . import DOMAIN
-from .client import WattBoxClient, DeviceMetrics
+from .client import WattBoxClient, DeviceMetrics, OutletInfo
 
 _LOGGER = logging.getLogger(__name__)
 
 CONF_VERIFY_SSL = "verify_ssl"
+
+DEFAULT_VERIFY_SSL = True
+DEFAULT_SCAN_INTERVAL = timedelta(seconds=30)
 
 PLATFORM_SCHEMA = cv.PLATFORM_SCHEMA.extend(
     {
         vol.Required(CONF_HOST): cv.string,
         vol.Required(CONF_USERNAME): cv.string,
         vol.Required(CONF_PASSWORD): cv.string,
-        vol.Optional(CONF_SCAN_INTERVAL): cv.time_period,
-        vol.Optional(CONF_VERIFY_SSL, default=True): cv.boolean,
+        vol.Optional(CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL): cv.time_period,
+        vol.Optional(CONF_VERIFY_SSL, default=DEFAULT_VERIFY_SSL): cv.boolean,
     }
 )
 
@@ -55,18 +59,45 @@ async def async_setup_platform(
 
     try:
         metrics = await client.async_fetch_metrics()
+        outlets = await client.async_fetch_outlets()
     except Exception as exc:  # noqa: BLE001
         _LOGGER.error("Failed to initialize WB-800 metrics at %s: %s", host, exc)
         return
 
-    add_entities(
-        [
-            WattBoxMetricSensor(client, host, "Voltage", "voltage", metrics.voltage, "V"),
-            WattBoxMetricSensor(client, host, "Power", "total_watts", metrics.total_watts, "W"),
-            WattBoxMetricSensor(client, host, "Current", "total_amps", metrics.total_amps, "A"),
-        ],
-        update_before_add=True,
-    )
+    entities: List[SensorEntity] = [
+        WattBoxMetricSensor(client, host, "Voltage", "voltage", metrics.voltage, "V"),
+        WattBoxMetricSensor(client, host, "Power", "total_watts", metrics.total_watts, "W"),
+        WattBoxMetricSensor(client, host, "Current", "total_amps", metrics.total_amps, "A"),
+    ]
+
+    # Add individual outlet power and current sensors
+    for outlet in outlets:
+        if outlet.watts is not None:
+            entities.append(
+                WattBoxOutletSensor(
+                    client,
+                    host,
+                    outlet.number,
+                    outlet.name or f"Outlet {outlet.number}",
+                    "watts",
+                    outlet.watts,
+                    "W",
+                )
+            )
+        if outlet.amps is not None:
+            entities.append(
+                WattBoxOutletSensor(
+                    client,
+                    host,
+                    outlet.number,
+                    outlet.name or f"Outlet {outlet.number}",
+                    "amps",
+                    outlet.amps,
+                    "A",
+                )
+            )
+
+    add_entities(entities, update_before_add=True)
 
 
 class WattBoxMetricSensor(SensorEntity):
@@ -115,4 +146,60 @@ class WattBoxMetricSensor(SensorEntity):
             self._state = value
         except Exception as exc:  # noqa: BLE001
             _LOGGER.warning("Failed to update metrics %s: %s", self._key, exc)
+
+
+class WattBoxOutletSensor(SensorEntity):
+    """Sensor for individual outlet power or current readings."""
+
+    def __init__(
+        self,
+        client: WattBoxClient,
+        host: str,
+        outlet_number: int,
+        outlet_name: str,
+        key: str,
+        initial_value: float | None,
+        unit: str,
+    ) -> None:
+        self._client = client
+        self._host = host
+        self._outlet_number = outlet_number
+        self._outlet_name = outlet_name
+        self._key = key
+        self._unit = unit
+        self._state = initial_value
+        # Match switch unique_id format for consistent entity IDs
+        self._attr_unique_id = f"wb800-{host}-outlet-{outlet_number}-{key}"
+
+    @property
+    def name(self) -> str:
+        return f"{self._outlet_name} {self._key.capitalize()}"
+
+    @property
+    def native_value(self):
+        return self._state
+
+    @property
+    def native_unit_of_measurement(self) -> str | None:
+        return self._unit
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._host)},
+            name=f"WattBox WB-800 ({self._host})",
+            manufacturer="SnapAV",
+            model="WattBox WB-800",
+        )
+
+    async def async_update(self) -> None:
+        try:
+            outlets: List[OutletInfo] = await self._client.async_fetch_outlets()
+            for outlet in outlets:
+                if outlet.number == self._outlet_number:
+                    value = getattr(outlet, self._key)
+                    self._state = value
+                    break
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning("Failed to update outlet sensor %s %s: %s", self._outlet_number, self._key, exc)
 
