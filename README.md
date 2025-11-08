@@ -1,6 +1,12 @@
 # WattBox WB-800 custom component for Home Assistant
 
+<<<<<<< HEAD
 ## Install
+=======
+I couldnt get the other WattBox component working well so I wrote a really quick and dirty one
+
+### Install
+>>>>>>> e881a7907571f49d6ae727da6b2beb3fd454693e
 
 Copy the `custom_components/wb800` folder into your Home Assistant `config/custom_components` directory.
 
@@ -18,7 +24,17 @@ switch:
     password: YOUR-PASSWORD
     verify_ssl: false
     scan_interval: 30
+<<<<<<< HEAD
 
+=======
+button:
+  - platform: wb800
+    host: YOUR-WATTBOX-HOST
+    username: YOUR-USERNAME
+    password: YOUR-PASSWORD
+    verify_ssl: false
+    scan_interval: 30
+>>>>>>> e881a7907571f49d6ae727da6b2beb3fd454693e
 sensor:
   - platform: wb800
     host: YOUR-WATTBOX-HOST
@@ -37,7 +53,7 @@ Notes:
 
 **Switch Platform:**
 
-- One `switch` per outlet, named from the WattBox UI.
+- One `switch` and reset `button` per outlet, named from the WattBox UI.
 - Attributes: `outlet_number`, `reset_only`, `watts`, `amps` (when available).
 
 **Sensor Platform:**
