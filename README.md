@@ -1,22 +1,19 @@
-# WattBox WB-800 custom component for Home Assistant
+WattBox WB-800 Custom Component for Home Assistant
 
-<<<<<<< HEAD
-## Install
-=======
-I couldnt get the other WattBox component working well so I wrote a really quick and dirty one
+I couldn’t get the other WattBox component working well, so this is a lightweight alternative designed to provide full control and energy monitoring for the SnapAV / WattBox WB-800 series.
 
-### Install
->>>>>>> e881a7907571f49d6ae727da6b2beb3fd454693e
+⸻
 
-Copy the `custom_components/wb800` folder into your Home Assistant `config/custom_components` directory.
+Installation
+	1.	Copy the custom_components/wb800 folder into your Home Assistant config/custom_components directory.
+	2.	Restart Home Assistant.
 
-Restart Home Assistant.
+⸻
 
-## Configure (YAML)
+Configuration (YAML)
 
-Add to `configuration.yaml`:
+Add the following to your configuration.yaml file:
 
-```yaml
 switch:
   - platform: wb800
     host: YOUR-WATTBOX-HOST
@@ -24,9 +21,7 @@ switch:
     password: YOUR-PASSWORD
     verify_ssl: false
     scan_interval: 30
-<<<<<<< HEAD
 
-=======
 button:
   - platform: wb800
     host: YOUR-WATTBOX-HOST
@@ -34,7 +29,7 @@ button:
     password: YOUR-PASSWORD
     verify_ssl: false
     scan_interval: 30
->>>>>>> e881a7907571f49d6ae727da6b2beb3fd454693e
+
 sensor:
   - platform: wb800
     host: YOUR-WATTBOX-HOST
@@ -42,33 +37,66 @@ sensor:
     password: YOUR-PASSWORD
     verify_ssl: false
     scan_interval: 30
-```
 
-Notes:
+Notes
+	•	Use verify_ssl: false if your WattBox uses a self-signed certificate. HTTP (http://) is also supported.
+	•	Each outlet will appear as an individual switch using the names defined in the WattBox UI.
+	•	Energy and power sensors are compatible with Home Assistant’s Energy Dashboard.
 
-- Set `verify_ssl: false` if the device uses a self-signed certificate. The integration also supports `http://` base URLs.
-- Each outlet will appear as an individual switch using the names from the device.
+⸻
 
-## Entities
+Entities
 
-**Switch Platform:**
+Switch Platform
+	•	One switch entity and an associated button (for reset) per outlet.
+	•	Attributes:
+	•	outlet_number
+	•	reset_only
+	•	watts
+	•	amps (when available)
 
-- One `switch` and reset `button` per outlet, named from the WattBox UI.
-- Attributes: `outlet_number`, `reset_only`, `watts`, `amps` (when available).
+Sensor Platform
+	•	System-level sensors:
+	•	WattBox Voltage — system voltage
+	•	WattBox Power — total instantaneous power draw
+	•	WattBox Current — total current draw
+	•	Per-outlet sensors:
+	•	{Outlet Name} Watts — instantaneous power per outlet
+	•	{Outlet Name} Amps — current draw per outlet
+	•	{Outlet Name} Energy — cumulative kWh (used by Energy Dashboard)
 
-**Sensor Platform:**
+⸻
 
-- `WattBox Voltage` - System voltage
-- `WattBox Power` - Total power consumption
-- `WattBox Current` - Total current draw
-- Individual sensors for each outlet: `{Outlet Name} Watts` and `{Outlet Name} Amps` when available
+Energy Dashboard Integration
 
-## Services
+This component now exposes energy sensors with:
+	•	device_class: energy
+	•	state_class: total_increasing
+	•	unit_of_measurement: kWh
 
-Turn on/off via standard switch services in Home Assistant.
+This allows you to add:
+	•	WB-800 Total Energy under “Grid Consumption”
+	•	Outlet-level Energy sensors under “Individual Devices”
 
-## Troubleshooting
+To configure:
+	1.	Go to Settings → Dashboards → Energy.
+	2.	Click Add Consumption / Individual Device.
+	3.	Select the WB-800 energy sensors.
 
-Ensure the WB-800 is reachable from Home Assistant and that the credentials are correct.
+⸻
 
-If your unit requires HTTP Basic Auth, it will be detected automatically. If it requires form login, the component will perform it transparently.
+Services
+
+Standard Home Assistant switch services apply:
+	•	switch.turn_on
+	•	switch.turn_off
+	•	button.press (for outlet reset)
+
+⸻
+
+Troubleshooting
+	•	Verify the WattBox is reachable and credentials are correct.
+	•	If the device uses HTTP Basic Auth, it’s detected automatically.
+	•	For form-based logins, authentication is handled transparently.
+	•	Check Developer Tools → Logs for connection or parsing errors.
+
