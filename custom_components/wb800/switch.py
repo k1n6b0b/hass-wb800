@@ -77,6 +77,7 @@ async def async_setup_platform(
 
 class WattBoxSwitch(SwitchEntity):
     _attr_has_entity_name = True
+    _attr_available = True
 
     def __init__(self, client: WattBoxClient, host: str, outlet: OutletInfo) -> None:
         self._client = client
@@ -99,7 +100,8 @@ class WattBoxSwitch(SwitchEntity):
 
     @property
     def available(self) -> bool:
-        return True
+        """Return if entity is available."""
+        return getattr(self, "_attr_available", True)
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -123,26 +125,90 @@ class WattBoxSwitch(SwitchEntity):
         return data
 
     async def async_update(self) -> None:
+        """Update the switch state from the device."""
         try:
             outlets = await self._client.async_fetch_outlets()
+            _LOGGER.debug(
+                "Updating switch for outlet %d (%s), found %d total outlets",
+                self._number,
+                self._name,
+                len(outlets),
+            )
+            outlet_found = False
             for outlet in outlets:
                 if outlet.number == self._number:
                     self._is_on = outlet.is_on
                     self._is_reset_only = outlet.is_reset_only
                     self._watts = outlet.watts
                     self._amps = outlet.amps
+                    self._attr_available = True
+                    outlet_found = True
+                    _LOGGER.debug(
+                        "Updated outlet %d (%s): on=%s, watts=%s, amps=%s",
+                        self._number,
+                        self._name,
+                        self._is_on,
+                        self._watts,
+                        self._amps,
+                    )
                     break
+            
+            if not outlet_found:
+                # Outlet not found - log available outlet numbers for debugging
+                available_numbers = [o.number for o in outlets]
+                _LOGGER.warning(
+                    "Outlet %d (%s) not found during update. Available outlets: %s",
+                    self._number,
+                    self._name,
+                    available_numbers,
+                )
+                self._attr_available = False
         except Exception as exc:  # noqa: BLE001
-            _LOGGER.warning("Update failed for outlet %s: %s", self._number, exc)
+            self._attr_available = False
+            _LOGGER.warning(
+                "Update failed for outlet %d (%s): %s",
+                self._number,
+                self._name,
+                exc,
+                exc_info=True,
+            )
 
     async def async_turn_on(self, **kwargs: Any) -> None:  # noqa: ARG002
-        await self._client.async_turn_on(self._number)
-        self._is_on = True
+        """Turn the outlet on."""
+        try:
+            await self._client.async_turn_on(self._number)
+            # Update state immediately for responsive UI
+            self._is_on = True
+            self.async_write_ha_state()
+            # Verify state from device (optional, but ensures accuracy)
+            await self.async_update()
+            self.async_write_ha_state()
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.error("Failed to turn on outlet %s: %s", self._number, exc)
+            raise
 
     async def async_turn_off(self, **kwargs: Any) -> None:  # noqa: ARG002
-        await self._client.async_turn_off(self._number)
-        self._is_on = False
+        """Turn the outlet off."""
+        try:
+            await self._client.async_turn_off(self._number)
+            # Update state immediately for responsive UI
+            self._is_on = False
+            self.async_write_ha_state()
+            # Verify state from device (optional, but ensures accuracy)
+            await self.async_update()
+            self.async_write_ha_state()
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.error("Failed to turn off outlet %s: %s", self._number, exc)
+            raise
 
     async def async_reset(self) -> None:
-        await self._client.async_reset(self._number)
+        """Reset the outlet (power cycle)."""
+        try:
+            await self._client.async_reset(self._number)
+            # Update state after reset
+            await self.async_update()
+            self.async_write_ha_state()
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.error("Failed to reset outlet %s: %s", self._number, exc)
+            raise
 
