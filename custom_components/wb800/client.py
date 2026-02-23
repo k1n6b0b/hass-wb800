@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import time
 from typing import List, Optional
 
 import aiohttp
@@ -26,7 +27,14 @@ class DeviceMetrics:
     total_amps: Optional[float]
 
 
+class _AuthExpiredError(RuntimeError):
+    """Raised when the device requires re-authentication."""
+
+
 class WattBoxClient:
+    _AUTH_RECHECK_SECONDS = 120.0
+    _MAIN_CACHE_TTL_SECONDS = 5.0
+
     def __init__(
         self,
         base_url: str,
@@ -46,7 +54,12 @@ class WattBoxClient:
         self._session = session
         self._own_session = session is None
         self._lock = asyncio.Lock()
+        self._main_fetch_lock = asyncio.Lock()
         self._httpx_client: Optional[httpx.AsyncClient] = None
+        self._basic_auth: Optional[aiohttp.BasicAuth] = None
+        self._auth_checked_monotonic: Optional[float] = None
+        self._main_html_cache: Optional[str] = None
+        self._main_cache_monotonic: Optional[float] = None
 
     async def __aenter__(self) -> "WattBoxClient":
         if self._session is None:
@@ -67,6 +80,13 @@ class WattBoxClient:
             await self._httpx_client.aclose()
             self._httpx_client = None
 
+    def _invalidate_main_cache(self) -> None:
+        self._main_html_cache = None
+        self._main_cache_monotonic = None
+
+    def _mark_auth_checked(self) -> None:
+        self._auth_checked_monotonic = time.monotonic()
+
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None:
             self._session = aiohttp.ClientSession(
@@ -76,50 +96,70 @@ class WattBoxClient:
             self._own_session = True
         return self._session
 
-    async def _ensure_logged_in(self) -> None:
+    async def _ensure_logged_in(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if (
+            not force
+            and self._auth_checked_monotonic is not None
+            and (now - self._auth_checked_monotonic) < self._AUTH_RECHECK_SECONDS
+        ):
+            return
+
         # Some firmwares use HTTP Basic, others Digest, others a login form.
-        # Strategy: try Basic; if 401 with Digest challenge, switch to Digest using httpx; if redirect to /login, try form.
+        # Strategy: try Basic; if 401 with Digest challenge, switch to Digest using httpx;
+        # if redirect to /login, try form login.
         async with self._lock:
+            now = time.monotonic()
+            if (
+                not force
+                and self._auth_checked_monotonic is not None
+                and (now - self._auth_checked_monotonic) < self._AUTH_RECHECK_SECONDS
+            ):
+                return
+
             session = await self._get_session()
-            # Try direct with Basic Auth first
             auth = aiohttp.BasicAuth(self._username, self._password)
+
             async with session.get(
-                f"{self._base_url}/main", auth=auth, ssl=self._verify_ssl, allow_redirects=False
+                f"{self._base_url}/main",
+                auth=auth,
+                ssl=self._verify_ssl,
+                allow_redirects=False,
             ) as resp:
                 if resp.status in (200, 304):
-                    # Basic auth appears to work; keep using it.
                     self._basic_auth = auth
+                    self._mark_auth_checked()
                     return
-                # If redirected to a login page, try form login
+
                 location = resp.headers.get("Location", "")
                 if "/login" in location:
-                    # Load the login page to obtain any cookies
-                    async with session.get(
-                        f"{self._base_url}/login", ssl=self._verify_ssl
-                    ) as _:
+                    async with session.get(f"{self._base_url}/login", ssl=self._verify_ssl):
                         pass
-                    data = {"username": self._username, "password": self._password}
                     async with session.post(
-                        f"{self._base_url}/login", data=data, ssl=self._verify_ssl, allow_redirects=True
+                        f"{self._base_url}/login",
+                        data={"username": self._username, "password": self._password},
+                        ssl=self._verify_ssl,
+                        allow_redirects=True,
                     ) as login_resp:
                         if login_resp.status not in (200, 302):
                             text = await login_resp.text()
                             raise RuntimeError(
                                 f"Login failed: HTTP {login_resp.status}: {text[:200]}"
                             )
-                    # After login, verify we can access /main
-                    async with session.get(
-                        f"{self._base_url}/main", ssl=self._verify_ssl
-                    ) as resp2:
+                    async with session.get(f"{self._base_url}/main", ssl=self._verify_ssl) as resp2:
                         if resp2.status != 200:
-                            raise RuntimeError(f"Login did not grant access: HTTP {resp2.status}")
+                            raise RuntimeError(
+                                f"Login did not grant access: HTTP {resp2.status}"
+                            )
                     self._basic_auth = None
+                    self._mark_auth_checked()
                     return
-                # If unauthorized, check for Digest
+
                 if resp.status == 401:
                     www = resp.headers.get("WWW-Authenticate", "")
                     if "Digest" in www:
-                        # Initialize httpx client with digest auth
+                        if self._httpx_client is not None:
+                            await self._httpx_client.aclose()
                         self._httpx_client = httpx.AsyncClient(
                             base_url=self._base_url,
                             auth=httpx.DigestAuth(self._username, self._password),
@@ -128,56 +168,101 @@ class WattBoxClient:
                             headers={"User-Agent": "wb800-ha-client/0.1"},
                             follow_redirects=True,
                         )
-                        # Probe /main
                         r = await self._httpx_client.get("/main", follow_redirects=False)
                         if r.status_code in (200, 304):
                             self._basic_auth = None
+                            self._mark_auth_checked()
                             return
                         if r.is_redirect and "/login" in r.headers.get("Location", ""):
-                            # Some firmwares may still require form login after digest (unlikely)
-                            # Try simple POST
-                            r2 = await self._httpx_client.post("/login", data={"username": self._username, "password": self._password})
+                            r2 = await self._httpx_client.post(
+                                "/login",
+                                data={"username": self._username, "password": self._password},
+                            )
                             if r2.status_code not in (200, 302):
-                                raise RuntimeError(f"Login failed after Digest: HTTP {r2.status_code}")
+                                raise RuntimeError(
+                                    f"Login failed after Digest: HTTP {r2.status_code}"
+                                )
                             r3 = await self._httpx_client.get("/main")
                             if r3.status_code != 200:
-                                raise RuntimeError(f"Login did not grant access after Digest: HTTP {r3.status_code}")
+                                raise RuntimeError(
+                                    "Login did not grant access after Digest: "
+                                    f"HTTP {r3.status_code}"
+                                )
+                            self._mark_auth_checked()
                             return
-                    raise RuntimeError("Unauthorized (401). Device requires Digest or credentials are wrong.")
-                # Otherwise, default to basic for subsequent calls anyway
-                self._basic_auth = auth
-                return
+                    raise RuntimeError(
+                        "Unauthorized (401). Device requires Digest or credentials are wrong."
+                    )
 
-    async def async_fetch_outlets(self) -> List[OutletInfo]:
+                self._basic_auth = auth
+                self._mark_auth_checked()
+
+    async def _fetch_main_html_once(self) -> str:
         await self._ensure_logged_in()
+
         if self._httpx_client is not None:
             resp = await self._httpx_client.get("/main")
+            if resp.status_code in (401, 403):
+                raise _AuthExpiredError(f"Auth failed with HTTP {resp.status_code}")
+            if resp.is_redirect and "/login" in resp.headers.get("Location", ""):
+                raise _AuthExpiredError("Redirected to login page")
             resp.raise_for_status()
-            html = resp.text
-        else:
-            session = await self._get_session()
-            kwargs = {"ssl": self._verify_ssl}
-            if getattr(self, "_basic_auth", None) is not None:
-                kwargs["auth"] = self._basic_auth
-            async with session.get(f"{self._base_url}/main", **kwargs) as resp:
-                resp.raise_for_status()
-                html = await resp.text()
+            return resp.text
+
+        session = await self._get_session()
+        kwargs = {"ssl": self._verify_ssl}
+        if self._basic_auth is not None:
+            kwargs["auth"] = self._basic_auth
+
+        async with session.get(f"{self._base_url}/main", **kwargs) as resp:
+            if resp.status in (401, 403):
+                raise _AuthExpiredError(f"Auth failed with HTTP {resp.status}")
+            if resp.status in (301, 302, 303, 307, 308) and "/login" in resp.headers.get(
+                "Location", ""
+            ):
+                raise _AuthExpiredError("Redirected to login page")
+            resp.raise_for_status()
+            return await resp.text()
+
+    async def async_fetch_main_html(self) -> str:
+        now = time.monotonic()
+        if (
+            self._main_html_cache is not None
+            and self._main_cache_monotonic is not None
+            and (now - self._main_cache_monotonic) < self._MAIN_CACHE_TTL_SECONDS
+        ):
+            return self._main_html_cache
+
+        async with self._main_fetch_lock:
+            now = time.monotonic()
+            if (
+                self._main_html_cache is not None
+                and self._main_cache_monotonic is not None
+                and (now - self._main_cache_monotonic) < self._MAIN_CACHE_TTL_SECONDS
+            ):
+                return self._main_html_cache
+
+            for attempt in range(2):
+                try:
+                    html = await self._fetch_main_html_once()
+                    self._main_html_cache = html
+                    self._main_cache_monotonic = time.monotonic()
+                    return html
+                except _AuthExpiredError:
+                    if attempt == 0:
+                        self._auth_checked_monotonic = None
+                        await self._ensure_logged_in(force=True)
+                        continue
+                    raise
+
+            raise RuntimeError("Failed to fetch main page after re-authentication")
+
+    async def async_fetch_outlets(self) -> List[OutletInfo]:
+        html = await self.async_fetch_main_html()
         return self.parse_outlets_from_html(html)
 
     async def async_fetch_metrics(self) -> DeviceMetrics:
-        await self._ensure_logged_in()
-        if self._httpx_client is not None:
-            resp = await self._httpx_client.get("/main")
-            resp.raise_for_status()
-            html = resp.text
-        else:
-            session = await self._get_session()
-            kwargs = {"ssl": self._verify_ssl}
-            if getattr(self, "_basic_auth", None) is not None:
-                kwargs["auth"] = self._basic_auth
-            async with session.get(f"{self._base_url}/main", **kwargs) as resp:
-                resp.raise_for_status()
-                html = await resp.text()
+        html = await self.async_fetch_main_html()
         metrics = self.parse_metrics_from_html(html)
         # Fallback: if total watts/amps missing, sum per-outlet values
         if metrics.total_watts is None or metrics.total_amps is None:
@@ -190,59 +275,52 @@ class WattBoxClient:
                 metrics.total_amps = round(amps_sum, 2)
         return metrics
 
-    async def async_turn_on(self, outlet_number: int) -> None:
+    async def _send_outlet_command(self, path: str, outlet_number: int) -> None:
         await self._ensure_logged_in()
-        if self._httpx_client is not None:
-            resp = await self._httpx_client.get(
-                "/outlet/on", params={"o": outlet_number}, follow_redirects=False
-            )
-            if resp.status_code not in (200, 302):
-                resp.raise_for_status()
-        else:
-            session = await self._get_session()
-            kwargs = {"ssl": self._verify_ssl}
-            if getattr(self, "_basic_auth", None) is not None:
-                kwargs["auth"] = self._basic_auth
-            async with session.get(
-                f"{self._base_url}/outlet/on", params={"o": outlet_number}, **kwargs
-            ) as resp:
-                resp.raise_for_status()
+
+        for attempt in range(2):
+            try:
+                if self._httpx_client is not None:
+                    resp = await self._httpx_client.get(
+                        path,
+                        params={"o": outlet_number},
+                        follow_redirects=False,
+                    )
+                    if resp.status_code in (401, 403):
+                        raise _AuthExpiredError(f"Auth failed with HTTP {resp.status_code}")
+                    if resp.status_code not in (200, 302):
+                        resp.raise_for_status()
+                else:
+                    session = await self._get_session()
+                    kwargs = {"ssl": self._verify_ssl}
+                    if self._basic_auth is not None:
+                        kwargs["auth"] = self._basic_auth
+                    async with session.get(
+                        f"{self._base_url}{path}",
+                        params={"o": outlet_number},
+                        **kwargs,
+                    ) as resp:
+                        if resp.status in (401, 403):
+                            raise _AuthExpiredError(f"Auth failed with HTTP {resp.status}")
+                        resp.raise_for_status()
+
+                self._invalidate_main_cache()
+                return
+            except _AuthExpiredError:
+                if attempt == 0:
+                    self._auth_checked_monotonic = None
+                    await self._ensure_logged_in(force=True)
+                    continue
+                raise
+
+    async def async_turn_on(self, outlet_number: int) -> None:
+        await self._send_outlet_command("/outlet/on", outlet_number)
 
     async def async_turn_off(self, outlet_number: int) -> None:
-        await self._ensure_logged_in()
-        if self._httpx_client is not None:
-            resp = await self._httpx_client.get(
-                "/outlet/off", params={"o": outlet_number}, follow_redirects=False
-            )
-            if resp.status_code not in (200, 302):
-                resp.raise_for_status()
-        else:
-            session = await self._get_session()
-            kwargs = {"ssl": self._verify_ssl}
-            if getattr(self, "_basic_auth", None) is not None:
-                kwargs["auth"] = self._basic_auth
-            async with session.get(
-                f"{self._base_url}/outlet/off", params={"o": outlet_number}, **kwargs
-            ) as resp:
-                resp.raise_for_status()
+        await self._send_outlet_command("/outlet/off", outlet_number)
 
     async def async_reset(self, outlet_number: int) -> None:
-        await self._ensure_logged_in()
-        if self._httpx_client is not None:
-            resp = await self._httpx_client.get(
-                "/outlet/reset", params={"o": outlet_number}, follow_redirects=False
-            )
-            if resp.status_code not in (200, 302):
-                resp.raise_for_status()
-        else:
-            session = await self._get_session()
-            kwargs = {"ssl": self._verify_ssl}
-            if getattr(self, "_basic_auth", None) is not None:
-                kwargs["auth"] = self._basic_auth
-            async with session.get(
-                f"{self._base_url}/outlet/reset", params={"o": outlet_number}, **kwargs
-            ) as resp:
-                resp.raise_for_status()
+        await self._send_outlet_command("/outlet/reset", outlet_number)
 
     @staticmethod
     def parse_outlets_from_html(html: str) -> List[OutletInfo]:
@@ -339,4 +417,3 @@ class WattBoxClient:
                 break
 
         return DeviceMetrics(voltage=voltage, total_watts=total_watts, total_amps=total_amps)
-
