@@ -1,101 +1,126 @@
-# WattBox WB-800 Custom Component for Home Assistant
+# WattBox WB-800 for Home Assistant
 
-I couldn’t get the other WattBox component working well, so this is a lightweight alternative designed to provide full control and energy monitoring for the SnapAV / WattBox WB-800 series.
+Custom integration for SnapAV WattBox WB-800 PDU devices.
 
----
+## Current Status
+
+- Config entry (UI) setup supported
+- Options flow supported (SSL verify + polling interval)
+- Legacy YAML platform setup still supported for backward compatibility
+- Entity model:
+  - Switches: outlet on/off (non-reset-only outlets)
+  - Buttons: outlet reset
+  - Sensors: system voltage/power/current/energy + per-outlet power/current/energy
 
 ## Installation
 
-1. Copy the `custom_components/wb800` folder into your Home Assistant `config/custom_components` directory.
+1. Copy the integration folder to Home Assistant:
+   - `custom_components/wb800` -> `/config/custom_components/wb800`
 2. Restart Home Assistant.
+3. Add integration from UI:
+   - **Settings -> Devices & Services -> Add Integration -> WattBox WB-800**
 
----
+## Recommended Setup (UI)
 
-## Configuration (YAML)
+When adding the integration, provide:
 
-Add the following to your `configuration.yaml` file:
+- `host`: hostname or URL of the WB-800
+- `username`
+- `password`
+- `verify_ssl`
+- `scan_interval` (seconds)
 
-~~~yaml
+Notes:
+
+- If `host` has no scheme, `http://` is assumed.
+- Recommended scan interval: `30` seconds.
+- Allowed scan interval range: `10` to `3600` seconds.
+
+## Optional Legacy YAML
+
+UI config entries are recommended, but legacy YAML remains supported.
+
+```yaml
 switch:
   - platform: wb800
-    host: YOUR-WATTBOX-HOST
-    username: YOUR-USERNAME
-    password: YOUR-PASSWORD
+    host: wb-800.local
+    username: !secret wb800_username
+    password: !secret wb800_password
     verify_ssl: false
     scan_interval: 30
 
 button:
   - platform: wb800
-    host: YOUR-WATTBOX-HOST
-    username: YOUR-USERNAME
-    password: YOUR-PASSWORD
+    host: wb-800.local
+    username: !secret wb800_username
+    password: !secret wb800_password
     verify_ssl: false
-    scan_interval: 30
 
 sensor:
   - platform: wb800
-    host: YOUR-WATTBOX-HOST
-    username: YOUR-USERNAME
-    password: YOUR-PASSWORD
+    host: wb-800.local
+    username: !secret wb800_username
+    password: !secret wb800_password
     verify_ssl: false
     scan_interval: 30
-~~~
+```
 
-### Notes
-- Use `verify_ssl: false` if your WattBox uses a self-signed certificate. HTTP (`http://`) is also supported.
-- Each outlet will appear as an individual switch using the names defined in the WattBox UI.
-- Energy and power sensors are compatible with Home Assistant’s Energy Dashboard.
+You can also import to config entries via top-level domain block:
 
----
+```yaml
+wb800:
+  - host: wb-800.local
+    username: !secret wb800_username
+    password: !secret wb800_password
+    verify_ssl: false
+    scan_interval: 30
+```
 
 ## Entities
 
-### Switch Platform
-- One switch entity and a reset button per outlet.
-- Attributes:
-  - `outlet_number`
-  - `reset_only`
-  - `watts`
-  - `amps` *(when available)*
+Device-level sensors:
 
-### Sensor Platform
-- **System-level sensors**
-  - Voltage
-  - Total instantaneous power
-  - Total current
+- `WattBox Voltage` (`V`)
+- `WattBox Power` (`W`)
+- `WattBox Current` (`A`)
+- `WattBox Energy` (`kWh`, `total_increasing`)
 
-- **Per-outlet sensors**
-  - `{Outlet Name} Watts`
-  - `{Outlet Name} Amps`
-  - `{Outlet Name} Energy` *(compatible with Energy Dashboard)*
+Per-outlet entities:
 
----
+- Switch: `<Outlet Name>`
+- Button: `<Outlet Name> Reset`
+- Sensors:
+  - `<Outlet Name> Power` (`W`)
+  - `<Outlet Name> Current` (`A`)
+  - `<Outlet Name> Energy` (`kWh`, `total_increasing`)
 
-## Energy Dashboard Integration
+## Authentication + Compatibility
 
-Energy sensors provide:
-- `device_class: energy`
-- `state_class: total_increasing`
-- `unit_of_measurement: kWh`
+The client handles WB-800 firmware variants that use:
 
-### To configure:
-1. Go to **Settings → Dashboards → Energy**.
-2. Click **Add Consumption / Individual Device**.
-3. Select the **WB-800 energy sensors**.
-
----
-
-## Services
-
-Standard Home Assistant services apply:
-- `switch.turn_on`
-- `switch.turn_off`
-- `button.press` *(for outlet reset)*
-
----
+- HTTP Basic authentication
+- HTTP Digest authentication
+- Form login flow
 
 ## Troubleshooting
 
-- Verify the WattBox is reachable and credentials are correct.
-- Both Basic Auth and form-based login are automatically detected.
-- Check **Developer Tools → Logs** for connection or parsing errors.
+Enable debug logs:
+
+```yaml
+logger:
+  logs:
+    custom_components.wb800: debug
+```
+
+Read-only connectivity checks:
+
+```sh
+nslookup wb-800.local
+curl -I http://wb-800.local/main
+```
+
+## Security Notes
+
+- Keep credentials in `secrets.yaml`.
+- Prefer HTTPS if your WB-800 firmware/network supports it.
+- Do not expose WB-800 management directly to the internet.
