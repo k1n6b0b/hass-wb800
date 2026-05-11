@@ -105,9 +105,11 @@ class WattBoxClient:
         ):
             return
 
-        # Some firmwares use HTTP Basic, others Digest, others a login form.
-        # Strategy: try Basic; if 401 with Digest challenge, switch to Digest using httpx;
-        # if redirect to /login, try form login.
+        # Probe with NO Authorization header so the device can advertise its auth scheme
+        # via the 401 WWW-Authenticate challenge. Sending Basic auth up-front causes
+        # Digest-only devices (e.g. WattBox) to log an auth failure and eventually lock
+        # their control API, breaking other integrations (e.g. Control4 Telnet driver).
+        # Basic auth is kept as a fallback for firmwares that genuinely require it.
         async with self._lock:
             now = time.monotonic()
             if (
@@ -118,16 +120,14 @@ class WattBoxClient:
                 return
 
             session = await self._get_session()
-            auth = aiohttp.BasicAuth(self._username, self._password)
 
             async with session.get(
                 f"{self._base_url}/main",
-                auth=auth,
                 ssl=self._verify_ssl,
                 allow_redirects=False,
             ) as resp:
                 if resp.status in (200, 304):
-                    self._basic_auth = auth
+                    self._basic_auth = None
                     self._mark_auth_checked()
                     return
 
@@ -190,11 +190,24 @@ class WattBoxClient:
                                 )
                             self._mark_auth_checked()
                             return
+                    else:
+                        # Basic auth fallback for firmwares that don't advertise Digest.
+                        auth = aiohttp.BasicAuth(self._username, self._password)
+                        async with session.get(
+                            f"{self._base_url}/main",
+                            auth=auth,
+                            ssl=self._verify_ssl,
+                            allow_redirects=False,
+                        ) as basic_resp:
+                            if basic_resp.status in (200, 304):
+                                self._basic_auth = auth
+                                self._mark_auth_checked()
+                                return
                     raise RuntimeError(
                         "Unauthorized (401). Device requires Digest or credentials are wrong."
                     )
 
-                self._basic_auth = auth
+                self._basic_auth = None
                 self._mark_auth_checked()
 
     async def _fetch_main_html_once(self) -> str:
